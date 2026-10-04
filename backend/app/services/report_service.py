@@ -41,11 +41,16 @@ class ReportService:
         exp = await deep_analytics.get_expense_and_efficiency_metrics(db)
         anomalies_rep = await anomaly_service.detect_all_anomalies(db, lookback_months=12)
 
-        # 2. Synthesize sections
-        total_rev = exp.get("total_revenue", 142580.0)
-        total_exp = exp.get("total_expenses", 79000.0)
+        # 2. Synthesize sections — require real data, never use hardcoded fallbacks
+        total_rev = exp.get("total_revenue")
+        total_exp = exp.get("total_expenses")
+        if total_rev is None or total_exp is None:
+            raise ValueError(
+                "Analytics data unavailable: 'total_revenue' or 'total_expenses' missing. "
+                "Cannot generate report with fabricated numbers."
+            )
         net_income = exp.get("net_operating_income", total_rev - total_exp)
-        exp_ratio = exp.get("expense_to_revenue_ratio", 55.4)
+        exp_ratio = exp.get("expense_to_revenue_ratio", round((total_exp / total_rev) * 100, 1) if total_rev else 0.0)
 
         exec_summary = (
             f"The business generated ₹{total_rev:,.2f} in total gross revenue with operating expenses of "

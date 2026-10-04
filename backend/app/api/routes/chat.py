@@ -118,10 +118,37 @@ async def chat(
             conversation_id=conversation_id,
         )
 
+    except ValueError as ve:
+        # Raised deliberately (e.g. analytics data missing, SQL plan error)
+        elapsed_ms = round((time.time() - start_time) * 1000, 1)
+        logger.warning(f"Validation/data error after {elapsed_ms}ms: {ve}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(ve),
+        )
+    except TimeoutError as te:
+        elapsed_ms = round((time.time() - start_time) * 1000, 1)
+        logger.error(f"LLM timeout after {elapsed_ms}ms: {te}")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="The AI model took too long to respond. Please try a simpler question or try again shortly.",
+        )
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 1)
+        err_str = str(e).lower()
         logger.error(f"Chat error after {elapsed_ms}ms: {e}")
+
+        # Categorize error for a more helpful frontend message
+        if "connection" in err_str or "could not connect" in err_str:
+            detail = "Database connection failed. Please ensure the PostgreSQL service is running."
+        elif "429" in err_str or "rate limit" in err_str:
+            detail = "The AI model is rate-limited. Please wait a moment and try again."
+        elif "sql" in err_str or "syntax error" in err_str:
+            detail = "Could not build a valid database query for your question. Try rephrasing."
+        else:
+            detail = f"An unexpected error occurred while processing your request: {str(e)}"
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while processing your request: {str(e)}",
+            detail=detail,
         )

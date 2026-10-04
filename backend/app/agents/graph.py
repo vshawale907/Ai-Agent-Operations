@@ -12,6 +12,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agents.nodes.multi_agent_nodes import (
     analytics_agent_node,
+    hybrid_sql_agent_node,
     insight_agent_node,
     orchestrator_node,
     rag_agent_node,
@@ -54,7 +55,7 @@ def build_multi_agent_graph() -> StateGraph:
     graph.add_node("orchestrator", orchestrator_node)
     graph.add_node("sql_agent", sql_agent_node)
     graph.add_node("rag_agent", rag_agent_node)
-    graph.add_node("hybrid_sql_agent", sql_agent_node)
+    graph.add_node("hybrid_sql_agent", hybrid_sql_agent_node)  # dedicated hybrid node
     graph.add_node("hybrid_rag_agent", rag_agent_node)
     graph.add_node("insight_agent", insight_agent_node)
     graph.add_node("analytics_agent", analytics_agent_node)

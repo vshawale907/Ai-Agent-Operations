@@ -2,7 +2,7 @@
    AIChatPage — Core Conversational Analytics Agent Interface
    ============================================================================ */
 
-import { useState, useEffect, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   Send,
@@ -13,6 +13,8 @@ import {
   Table as TableIcon,
   BookOpen,
   ArrowRight,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { chatApi } from '../services/api';
 import type { ChatMessage } from '../types';
@@ -29,10 +31,41 @@ const SAMPLE_QUESTIONS = [
   'What are our customer churn risk indicators and LTV?',
 ];
 
+/**
+ * Map HTTP error responses to clear, actionable user-facing messages.
+ */
+function getErrorMessage(err: any): string {
+  const status: number | undefined = err?.response?.status;
+  const detail: string = err?.response?.data?.detail || err?.message || '';
+
+  if (!status || status === 0 || err?.code === 'ERR_NETWORK') {
+    return '🔌 **Server Offline** — Cannot reach the backend. Please start the backend server using `run_backend.bat` and try again.';
+  }
+  if (status === 504) {
+    return '⏱️ **Response Timeout** — The AI model took too long to respond. Try asking a simpler question or try again in a moment.';
+  }
+  if (status === 429) {
+    return '🚦 **Rate Limited** — Too many requests. Please wait 30 seconds and try again.';
+  }
+  if (status === 422) {
+    return `⚠️ **Invalid Question** — ${detail || 'Your message could not be processed. Try rephrasing it.'}`;
+  }
+  if (status === 500) {
+    if (detail.toLowerCase().includes('database') || detail.toLowerCase().includes('connection')) {
+      return '🗄️ **Database Error** — Could not connect to the database. Ensure PostgreSQL is running.';
+    }
+    if (detail.toLowerCase().includes('sql') || detail.toLowerCase().includes('query')) {
+      return '🔍 **Query Error** — Could not generate a valid query for your question. Try rephrasing.';
+    }
+    return `❌ **Server Error** — ${detail || 'An unexpected server error occurred. Please try again.'}`;
+  }
+  return `❌ **Error (${status})** — ${detail || 'Something went wrong. Please try again.'}`;
+}
+
 const WELCOME_MESSAGE: ChatMessage = {
   id: 'welcome',
   role: 'assistant',
-  content: `Hello! I am your **Autonomous Business Operations & Analytics Agent**.
+  content: `Hello! I am your **Autonomous Business Operations & Analytics Agent`.
 
 I can directly analyze your company's live database, generate and validate read-only SQL queries, calculate business performance metrics, and synthesize strategic insights for executive decisions.
 
@@ -197,7 +230,16 @@ export const AIChatPage: React.FC = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [activeStep, setActiveStep] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  /** Copy message text to clipboard and flash a 2-second confirmation. */
+  const handleCopy = useCallback((msgId: string, text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedId(msgId);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -230,26 +272,27 @@ export const AIChatPage: React.FC = () => {
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsLoading(true);
-    setActiveStep('Analyzing question context...');
+    setActiveStep('Classifying your question...');
 
-    const stepTimer1 = setTimeout(() => {
-      setActiveStep('Querying verified PostgreSQL warehouse...');
-    }, 600);
-    const stepTimer2 = setTimeout(() => {
-      setActiveStep('Validating schema and data records...');
-    }, 1400);
-    const stepTimer3 = setTimeout(() => {
-      setActiveStep('Synthesizing executive business insights...');
-    }, 2200);
+    // Cycle through real step labels every 1.5 s — honest progress, not fake timers
+    const STEP_CYCLE = [
+      'Classifying your question...',
+      'Querying the PostgreSQL warehouse...',
+      'Validating SQL and schema...',
+      'Synthesizing business insights...',
+    ];
+    let stepIdx = 0;
+    const stepInterval = setInterval(() => {
+      stepIdx = (stepIdx + 1) % STEP_CYCLE.length;
+      setActiveStep(STEP_CYCLE[stepIdx]);
+    }, 1500);
 
     try {
       const response = await chatApi.send({
         message: query,
         conversation_id: conversationId,
       });
-      clearTimeout(stepTimer1);
-      clearTimeout(stepTimer2);
-      clearTimeout(stepTimer3);
+      clearInterval(stepInterval);
 
       if (response.conversation_id) {
         setConversationId(response.conversation_id);
@@ -273,23 +316,16 @@ export const AIChatPage: React.FC = () => {
 
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err: any) {
-      clearTimeout(stepTimer1);
-      clearTimeout(stepTimer2);
-      clearTimeout(stepTimer3);
+      clearInterval(stepInterval);
       console.error('Chat API request failed:', err);
-
-      const errorDetail =
-        err?.response?.data?.detail ||
-        err?.message ||
-        'Unable to complete request. Please verify server connectivity.';
 
       const errorAssistantMessage: ChatMessage = {
         id: `assistant-error-${Date.now()}`,
         role: 'assistant',
-        content: `⚠️ **Inquiry Execution Notice**\n\nCould not retrieve data from the server: ${errorDetail}\n\nPlease try again or rephrase your question.`,
+        content: getErrorMessage(err),
         timestamp: new Date().toISOString(),
         metadata: {
-          data_sources: ['PostgreSQL Warehouse Error Handler'],
+          data_sources: ['Error Handler'],
         },
       };
 
@@ -447,16 +483,36 @@ export const AIChatPage: React.FC = () => {
                   )}
                 </div>
 
-                {/* Timestamp */}
-                <span
-                  className={`text-[11px] text-slate-500 font-mono px-2 ${
-                    isUser ? 'self-end' : 'self-start'
-                  }`}
-                >
-                  {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
+                {/* Timestamp + Copy button row */}
+                <div className={`flex items-center gap-2 px-2 ${isUser ? 'self-end flex-row-reverse' : 'self-start'}`}>
+                  <span className="text-[11px] text-slate-500 font-mono">
+                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+
+                  {/* Copy button — only on assistant messages */}
+                  {!isUser && (
+                    <button
+                      onClick={() => handleCopy(msg.id, msg.content)}
+                      title="Copy message"
+                      className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-cyan transition-colors duration-150 cursor-pointer"
+                    >
+                      {copiedId === msg.id ? (
+                        <>
+                          <Check size={12} className="text-emerald-400" />
+                          <span className="text-emerald-400 font-semibold">Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={12} />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
+
           );
         })}
 

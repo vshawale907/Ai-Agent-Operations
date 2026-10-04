@@ -143,3 +143,50 @@ def get_llm_provider() -> LLMProvider:
 def get_llm(temperature: float = 0.0) -> BaseChatModel:
     """Convenience: get a ready-to-use LangChain chat model."""
     return get_llm_provider().get_chat_model(temperature=temperature)
+
+
+def get_llm_with_retry(temperature: float = 0.0, max_retries: int = 3) -> BaseChatModel:
+    """Get an LLM model instance; retry with exponential backoff on rate-limit errors.
+
+    On a 429 (Too Many Requests) error, waits 1 s, then 2 s, then 4 s before
+    giving up. This prevents full agent failures when the LLM API is busy.
+
+    Usage:
+        llm = get_llm_with_retry()          # same interface as get_llm()
+        response = await llm.ainvoke(msgs)
+    """
+    import asyncio
+
+    class _RetryWrapper:
+        """Thin async wrapper that adds retry-on-429 to any BaseChatModel."""
+
+        def __init__(self, model: BaseChatModel, retries: int) -> None:
+            self._model = model
+            self._retries = retries
+
+        async def ainvoke(self, messages, **kwargs):
+            last_exc: Exception | None = None
+            for attempt in range(self._retries):
+                try:
+                    return await self._model.ainvoke(messages, **kwargs)
+                except Exception as exc:
+                    err_str = str(exc)
+                    is_rate_limit = "429" in err_str or "rate limit" in err_str.lower() or "quota" in err_str.lower()
+                    if is_rate_limit and attempt < self._retries - 1:
+                        wait_seconds = 2 ** attempt  # 1 s, 2 s, 4 s
+                        logger.warning(
+                            f"LLM rate-limited (attempt {attempt + 1}/{self._retries}). "
+                            f"Retrying in {wait_seconds}s..."
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        last_exc = exc
+                    else:
+                        raise
+            raise last_exc  # type: ignore[misc]
+
+        # Proxy non-async calls and attribute access to the underlying model
+        def __getattr__(self, name: str):
+            return getattr(self._model, name)
+
+    model = get_llm_provider().get_chat_model(temperature=temperature)
+    return _RetryWrapper(model, max_retries)  # type: ignore[return-value]

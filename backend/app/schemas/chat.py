@@ -5,13 +5,22 @@ Chat and AI agent Pydantic schemas.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatRequest(BaseModel):
     """User chat message request."""
     message: str = Field(..., min_length=1, max_length=2000)
     conversation_id: Optional[str] = None
+
+    @field_validator("message")
+    @classmethod
+    def message_must_not_be_blank(cls, v: str) -> str:
+        """Strip whitespace and reject blank/whitespace-only messages."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Message cannot be empty or whitespace-only.")
+        return stripped
 
 
 class ChartData(BaseModel):

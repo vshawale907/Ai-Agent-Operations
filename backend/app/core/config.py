@@ -5,10 +5,13 @@ All configuration is loaded from environment variables or .env file.
 No secrets are hardcoded.
 """
 
+import sys
 from functools import lru_cache
 from typing import List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEFAULT_JWT_SECRET = "change-this-to-a-random-secret-in-production"
 
 
 class Settings(BaseSettings):
@@ -33,7 +36,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # --- JWT ---
-    jwt_secret_key: str = "change-this-to-a-random-secret-in-production"
+    jwt_secret_key: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 1440  # 24 hours
 
@@ -70,3 +73,26 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def startup_security_check() -> None:
+    """Check critical security settings at startup.
+
+    - In production: halt if the default JWT secret is still in use.
+    - In development: log a loud warning but continue.
+    """
+    if settings.jwt_secret_key == _DEFAULT_JWT_SECRET:
+        if not settings.is_development:
+            print(
+                "[SECURITY ERROR] JWT_SECRET_KEY is set to the default value. "
+                "This is a critical security vulnerability in production. "
+                "Set a strong random secret in your .env file and restart.",
+                flush=True,
+            )
+            sys.exit(1)
+        else:
+            print(
+                "[SECURITY WARNING] JWT_SECRET_KEY is using the default insecure value. "
+                "Set JWT_SECRET_KEY in your .env file before deploying to production.",
+                flush=True,
+            )

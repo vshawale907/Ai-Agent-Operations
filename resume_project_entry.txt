@@ -1,0 +1,8 @@
+AI-Powered Business Operations & Analytics Agent
+Tech Stack: React 19, TypeScript, FastAPI, LangChain, LangGraph, PostgreSQL 15, Redis 7, Docker Compose
+
+• Orchestrated an 8-node LangChain & LangGraph multi-agent system with conditional routing across text-to-SQL, document RAG, and hybrid insight synthesis pipelines.
+• Engineered a secure Text-to-SQL engine with AST/regex validation, blocking 29 dangerous SQL statement types, automated retry loops, and row-limit enforcement.
+• Built a user-scoped document RAG pipeline supporting PDF/DOCX parsing, semantic chunking, and cosine similarity vector retrieval with source citations.
+• Integrated Redis-backed sliding-window rate limiting (20 req/min per user) and asynchronous TTL query caching with graceful in-memory fallbacks.
+• Containerized 4 microservices (FastAPI, React/Nginx, PostgreSQL, Redis) via Docker Compose with automated GitHub Actions CI and 62 Pytest tests.

@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import analytics, auth, chat, documents, health, reports
-from app.core.config import settings
+from app.core.config import settings, startup_security_check
 from app.core.logging import (
     generate_request_id,
     get_logger,
@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
     setup_logging()
+    startup_security_check()  # Warn or halt if default JWT secret is still in use
     logger.info("AI Business Operations Agent starting up...")
     logger.info(f"Environment: {settings.app_env}")
     logger.info(f"LLM Provider: {settings.llm_provider}")

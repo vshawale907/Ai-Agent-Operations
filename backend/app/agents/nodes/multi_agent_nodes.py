@@ -427,10 +427,176 @@ async def sql_agent_node(state: AgentState) -> dict:
 
 
 # =============================================================================
-# 3. RAG Agent Node
+# 2b. Hybrid SQL Agent Node — dedicated node for HYBRID intent
+#     Requests broader columns (product names, customer segments, region data)
+#     so the downstream Insight Agent can cross-reference with RAG documents.
+# =============================================================================
+async def hybrid_sql_agent_node(state: AgentState) -> dict:
+    """Like sql_agent_node but enriches the prompt for HYBRID intent.
+
+    Fetches additional context columns (product names, customer segments, regions)
+    so the Insight Agent can meaningfully cross-reference live data with
+    retrieved policy/document excerpts from the RAG Agent.
+    """
+    question = state.get("resolved_question") or state.get("user_question", "")
+
+    _, period_label, date_filter_sql = _resolve_relative_dates(question)
+
+    schema = get_schema_context()
+    glossary = get_glossary_context()
+
+    enriched_question = question
+    if period_label and date_filter_sql:
+        enriched_question = (
+            f"{question}\n"
+            f"[Date context: resolved period = '{period_label}'. "
+            f"Use this exact SQL date filter: {date_filter_sql}]"
+        )
+
+    history = state.get("conversation_history", [])
+    history_ctx = ""
+    if history:
+        history_ctx = "\n### RECENT CONVERSATION CONTEXT:\n" + "\n".join(
+            f"- {m.get('role', 'user')}: {m.get('content', '')[:100]}"
+            for m in history[-3:]
+        )
+
+    def build_hybrid_prompt(question_text: str, prev_error: str = "") -> str:
+        error_block = f"\n### PREVIOUS SQL ERROR (fix it):\n{prev_error}\n" if prev_error else ""
+        return (
+            "You are a specialized PostgreSQL Business Analytics Engineer.\n"
+            "This query is part of a HYBRID workflow: your SQL result will be\n"
+            "combined with company policy/document excerpts by an Insight Agent.\n"
+            "Fetch BROAD context columns (product names, customer segments, regions,\n"
+            "categories) to enable meaningful cross-referencing with documents.\n\n"
+            f"### DATABASE SCHEMA:\n{schema}\n\n"
+            f"### BUSINESS GLOSSARY:\n{glossary}\n"
+            f"{history_ctx}\n"
+            f"{error_block}"
+            "### SAFETY RULES:\n"
+            "- SELECT only. NEVER DROP, DELETE, UPDATE, INSERT, ALTER, TRUNCATE.\n"
+            "- No semicolons or query chaining.\n"
+            "- Default status = 'completed' unless specified.\n"
+            "- All money is INR. Regions: North, South, East, West, Central.\n"
+            "- Limit unaggregated results to 50 rows.\n"
+            "- Use the resolved date filter exactly as given.\n\n"
+            f"Question: {question_text}\n\n"
+            "Respond ONLY with JSON: {\"sql\": \"SELECT ...\", \"explanation\": \"...\"}"
+        )
+
+    llm = get_llm(temperature=0.0)
+    start_time = time.time()
+    raw_sql = None
+    explanation = ""
+    last_error = ""
+
+    for attempt in range(1, 4):
+        try:
+            prompt_text = build_hybrid_prompt(enriched_question, prev_error=last_error)
+            res = await llm.ainvoke([HumanMessage(content=prompt_text)])
+            content = res.content.strip()
+            if "```" in content:
+                content = content.split("```")[1].strip()
+                if content.startswith("json"):
+                    content = content[4:].strip()
+            parsed = json.loads(content)
+            raw_sql = parsed.get("sql", "").strip()
+            explanation = parsed.get("explanation", "")
+        except Exception as e:
+            logger.warning(f"Hybrid SQL LLM failed (attempt {attempt}): {e}. Using structured planner.")
+            raw_sql, explanation = generate_structured_sql(enriched_question)
+
+        if not raw_sql:
+            raw_sql, explanation = generate_structured_sql(enriched_question)
+
+        val = validate_sql(raw_sql)
+        if not val.is_valid:
+            err_msg = ", ".join(val.errors) if val.errors else (val.error or "validation failed")
+            logger.warning(f"Hybrid SQL validation failed (attempt {attempt}): {err_msg}")
+            if attempt == 1:
+                raw_sql, explanation = generate_structured_sql(enriched_question)
+                val = validate_sql(raw_sql)
+                if not val.is_valid:
+                    last_error = err_msg
+                    continue
+            elif attempt >= 3:
+                return {
+                    "generated_sql": raw_sql,
+                    "is_sql_valid": False,
+                    "validation_error": err_msg,
+                    "query_result": [],
+                    "row_count": 0,
+                    "database_facts": f"Hybrid SQL failed safety validation: {err_msg}.",
+                    "citations": [],
+                }
+            else:
+                last_error = err_msg
+                continue
+
+        exec_res = await execute_safe_sql_tool(raw_sql)
+        exec_time = round((time.time() - start_time) * 1000, 1)
+
+        if not exec_res.get("success"):
+            db_err = exec_res.get("error", "Unknown DB error")
+            logger.warning(f"Hybrid SQL execution error (attempt {attempt}): {db_err}")
+            if attempt < 3:
+                last_error = f"DB execution error: {db_err}"
+                continue
+            return {
+                "generated_sql": raw_sql,
+                "sql_explanation": explanation,
+                "is_sql_valid": True,
+                "query_result": [],
+                "row_count": 0,
+                "execution_time_ms": exec_time,
+                "database_facts": f"Database error during hybrid query: {db_err}",
+                "citations": [],
+            }
+
+        rows = exec_res.get("rows", [])
+        logger.info(f"Hybrid SQL executed in {exec_time}ms: {len(rows)} rows | {raw_sql[:120]}")
+
+        period_note = f" for {period_label}" if period_label else ""
+        citations = [{
+            "source_type": "database",
+            "title": "PostgreSQL Business Database (Hybrid Query)",
+            "reference": f"Source: PostgreSQL Warehouse{period_note} [Hybrid Mode]",
+            "excerpt": raw_sql,
+        }]
+
+        if rows:
+            facts_lines = [f"Retrieved {len(rows)} database records (hybrid context){period_note}:"]
+            for r in rows[:8]:
+                facts_lines.append(" * " + ", ".join(f"{k}: {v}" for k, v in r.items()))
+            db_facts = "\n".join(facts_lines)
+        else:
+            db_facts = f"Database returned 0 rows for hybrid query{period_note}."
+
+        return {
+            "generated_sql": raw_sql,
+            "sql_explanation": explanation,
+            "is_sql_valid": True,
+            "query_result": rows,
+            "table_data": rows,
+            "row_count": len(rows),
+            "execution_time_ms": exec_time,
+            "database_facts": db_facts,
+            "citations": citations,
+            "period_label": period_label or "",
+        }
+
+    return {
+        "generated_sql": raw_sql or "",
+        "is_sql_valid": False,
+        "query_result": [],
+        "row_count": 0,
+        "database_facts": "Hybrid SQL generation failed after all retries.",
+        "citations": [],
+    }
+
 # =============================================================================
 async def rag_agent_node(state: AgentState) -> dict:
-    """Execute tenant-isolated vector search, defend against prompt injection, format citations."""
+    """Execute user-scoped vector search, defend against prompt injection, format citations."""
     question = state.get("user_question", "")
     user_id = state.get("user_id", 1)
     logger.info(f"RAG Agent searching for user_id={user_id}: '{question[:60]}'")

@@ -29,22 +29,95 @@ MONTH_NAMES = {
     "december": "12", "dec": "12",
 }
 
+# ---------------------------------------------------------------------------
+# Synonym map: normalise natural-language phrases before keyword matching.
+# Keys are lowercase phrases the user might say; values are canonical tokens
+# that the planner's if/elif logic already knows how to handle.
+# ---------------------------------------------------------------------------
+SYNONYM_MAP: Dict[str, str] = {
+    # Product synonyms
+    "top sellers": "top product",
+    "top selling": "top product",
+    "best sellers": "top product",
+    "best selling": "top product",
+    "top items": "top product",
+    "top selling items": "top product",
+    "selling well": "product",
+    # Revenue/sales synonyms
+    "how much did we make": "total revenue",
+    "how much did we earn": "total revenue",
+    "how are sales": "revenue",
+    "how is revenue": "revenue",
+    "earnings": "revenue",
+    "income": "revenue",
+    "turnover": "revenue",
+    "gross revenue": "revenue",
+    # Customer synonyms
+    "biggest customers": "top customer spend",
+    "biggest spenders": "top customer spend",
+    "top spenders": "top customer spend",
+    "loyal customers": "customer",
+    "key accounts": "customer",
+    # Region synonyms
+    "north territory": "north region",
+    "south territory": "south region",
+    "east territory": "east region",
+    "west territory": "west region",
+    "central territory": "central region",
+    # Expense synonyms
+    "operating costs": "expense",
+    "operating cost": "expense",
+    "overheads": "expense",
+    "overhead": "expense",
+    "spend": "expense",
+    # Profit/margin synonyms
+    "gross margin": "margin",
+    "net margin": "margin",
+    "profitability": "profit margin",
+    "how profitable": "margin",
+}
+
+
+def normalize_question(q: str) -> str:
+    """Expand common synonyms before keyword matching.
+
+    Replaces known synonym phrases with their canonical equivalents so the
+    downstream SQL case-matching works reliably regardless of phrasing.
+    """
+    q_lower = q.lower()
+    # Sort by length descending so longer phrases are replaced first
+    for phrase, replacement in sorted(SYNONYM_MAP.items(), key=lambda x: -len(x[0])):
+        q_lower = q_lower.replace(phrase, replacement)
+    return q_lower
+
+
 
 def resolve_conversation_context(
     current_question: str,
     history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
-    """Resolve pronouns and follow-up phrases using conversation history."""
+    """Resolve pronouns and follow-up phrases using conversation history.
+
+    Reads both the last user turn and the last assistant turn so follow-up
+    questions like 'break it down by category now' can reference what the AI
+    previously showed.
+    """
     if not history or not current_question.strip():
         return current_question.strip()
 
     q_lower = current_question.lower().strip()
 
-    # Find the most recent user turn
+    # Find the most recent user AND assistant turns
     last_user_turn = ""
+    last_assistant_turn = ""
     for msg in reversed(history):
-        if msg.get("role") == "user":
-            last_user_turn = msg.get("content", "")
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user" and not last_user_turn:
+            last_user_turn = content
+        elif role == "assistant" and not last_assistant_turn:
+            last_assistant_turn = content
+        if last_user_turn and last_assistant_turn:
             break
 
     if not last_user_turn:
@@ -56,6 +129,7 @@ def resolve_conversation_context(
         r"^(compare\s+(?:it|this|that)?\s*(?:with|to)\s*)(.+)",
         r"^(which\s+(?:of\s+those|one|product|region)\s+.*)",
         r"^(now\s+show|now\s+for|what\s+is\s+the\s+same\s+for)\s+(.+)",
+        r"^(break\s+it\s+down|split\s+it|show\s+the\s+same)\s+(?:by\s+)?(.+)",
     ]
 
     for pat in followup_patterns:
@@ -76,19 +150,26 @@ def resolve_conversation_context(
                         if new_c.lower() in target:
                             return re.sub(re.escape(c), new_c, last_user_turn, flags=re.IGNORECASE)
 
+            # "break it down by category" -> reframe last question with category grouping
+            if "categor" in target:
+                return f"{last_user_turn} broken down by category"
+
             # If comparison follow-up:
             if "compare" in q_lower:
                 return f"{last_user_turn} and compare with {target}"
 
             return f"{last_user_turn} ({current_question})"
 
-    # If it refers to "there", "it", "those"
+    # If it refers to "there", "it", "those" — resolve from last assistant context too
     if re.search(r"\b(there|it|that|those|them)\b", q_lower):
+        # Prefer regions/categories mentioned in the last assistant response
+        context_to_scan = last_user_turn + " " + last_assistant_turn
+        context_lower = context_to_scan.lower()
         for r in VALID_REGIONS:
-            if r.lower() in last_user_turn.lower() and r.lower() not in q_lower:
+            if r.lower() in context_lower and r.lower() not in q_lower:
                 return f"{current_question} in {r} region"
         for c in VALID_CATEGORIES:
-            if c.lower() in last_user_turn.lower() and c.lower() not in q_lower:
+            if c.lower() in context_lower and c.lower() not in q_lower:
                 return f"{current_question} in {c} category"
 
     return current_question
@@ -97,7 +178,9 @@ def resolve_conversation_context(
 def generate_structured_sql(question: str) -> Tuple[str, str]:
     """Generate exact, schema-accurate PostgreSQL query from question parameters."""
     q = question.strip()
-    q_lower = q.lower()
+    # Normalize synonyms before keyword matching so phrases like "top sellers"
+    # or "earnings" are expanded to canonical tokens the planner understands.
+    q_lower = normalize_question(q)
 
     # Detect requested limit
     limit_match = re.search(r"\b(?:top|first|limit)\s+(\d+)\b", q_lower)
